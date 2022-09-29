@@ -88,7 +88,7 @@ public object JdkStreamSupport {
         Long.MAX_VALUE, Spliterator.ORDERED or Spliterator.IMMUTABLE
     ) {
 
-        private val queue = ArrayBlockingQueue<Any?>(4)
+        private val queue = ArrayBlockingQueue<Any?>(1)
         private var completed = false
 
         @JvmField
@@ -109,34 +109,34 @@ public object JdkStreamSupport {
             if (unintercepted) {
                 return@run (suspend {
                     flow.collect { item ->
-                        suspendCoroutineUninterceptedOrReturn<Unit> { cort ->
-                            nextStep = cort
+                        suspendCoroutineUninterceptedOrReturn<Unit> { cont ->
+                            nextStep = cont
                             queue.put(boxValue(item))
                             COROUTINE_SUSPENDED
                         }
                     }
                 }).createCoroutineUnintercepted(completion)
-            }
-
-            return@run (suspend {
-                flow.collect { item ->
-                    suspendCancellableCoroutine<Unit> { cort ->
-                        nextStep = cort
-                        queue.put(boxValue(item))
+            } else {
+                return@run (suspend {
+                    flow.collect { item ->
+                        suspendCancellableCoroutine<Unit> { cont ->
+                            nextStep = cont
+                            queue.put(boxValue(item))
+                        }
                     }
-                }
-            }).createCoroutine(completion)
+                }).createCoroutine(completion)
+            }
         }
 
         private inline fun boxValue(value: Any?): Any {
             return value ?: NULL_PLACEHOLDER
         }
 
-        private fun complete(value: Any?, action: Consumer<in T>): Boolean {
-            if (value is CompleteToken) {
+        private fun fireResponse(value: Any?, action: Consumer<in T>): Boolean {
+            if (value is CompleteToken) { // completion & exception caught
                 value.error?.let { throw boxError(it) }
                 completed = true
-                return false
+                return false // no more value available
             }
             if (value === NULL_PLACEHOLDER) { // null
                 @Suppress("UNCHECKED_CAST")
@@ -152,7 +152,7 @@ public object JdkStreamSupport {
             if (completed) return false
 
             if (queue.isNotEmpty()) {
-                return complete(queue.take(), action)
+                return fireResponse(queue.take(), action)
             }
             if (cancelled) return false
 
@@ -160,25 +160,21 @@ public object JdkStreamSupport {
             nextStep = null
             step.resume(Unit)
 
-            return complete(queue.take(), action)
+            return fireResponse(queue.take(), action)
         }
 
     }
 
-    private val FSClassName: String = FlowSpliterator::class.java.name
-
     private fun boxError(error: Throwable): Throwable {
-        if (error is Error) return error // System error. Nothing to do
+        return ExceptionInFlowException(error)
+    }
 
-        error.stackTrace.forEach { stackTraceElement ->
-            if (stackTraceElement.className == FSClassName && stackTraceElement.methodName == "tryAdvance") {
-                // Stack trace OK
-                return error
-            }
-        }
-
-        // Stack traces of Spliterator.tryAdvance() lose
-        return RuntimeException(error)
+    // @PublishedApi
+    public open class ExceptionInFlowException : RuntimeException {
+        public constructor() : super()
+        public constructor(msg: String?) : super(msg)
+        public constructor(cause: Throwable?) : super(cause)
+        public constructor(msg: String?, cause: Throwable?) : super(msg, cause)
     }
 }
 
